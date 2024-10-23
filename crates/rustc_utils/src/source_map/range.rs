@@ -280,12 +280,7 @@ impl ByteRange {
         "Could not load source for file: {:?}",
         file.name
       );
-      let external = file.external_src.borrow();
-      let _src = file
-        .src
-        .as_ref()
-        .unwrap_or_else(|| external.get_source().as_ref().unwrap());
-
+      
       let byte_start = BytePos(span.lo().0 as usize);
       let byte_end = BytePos(span.hi().0 as usize);
 

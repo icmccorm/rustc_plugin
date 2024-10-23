@@ -1,59 +1,11 @@
 //! Polonius integration to extract borrowck facts from rustc.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-
 use rustc_borrowck::consumers::{BodyWithBorrowckFacts, ConsumerOptions};
-use rustc_data_structures::fx::FxHashSet as HashSet;
 use rustc_hir::def_id::LocalDefId;
-use rustc_middle::{
-  mir::{Body, BorrowCheckResult, MirPass, StatementKind, TerminatorKind},
-  ty::TyCtxt,
-  util::Providers,
-};
+use rustc_middle::{mir::BorrowCheckResult, ty::TyCtxt, util::Providers};
 
-use crate::{block_timer, cache::Cache, BodyExt};
-
-/// MIR pass to remove instructions not important for Flowistry.
-///
-/// This pass helps reduce the number of intermediates during dataflow analysis, which
-/// reduces memory usage.
-pub struct SimplifyMir;
-impl<'tcx> MirPass<'tcx> for SimplifyMir {
-  fn run_pass(&self, _tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-    let return_blocks = body
-      .all_returns()
-      .filter_map(|loc| {
-        let bb = &body.basic_blocks[loc.block];
-        (bb.statements.len() == 0).then_some(loc.block)
-      })
-      .collect::<HashSet<_>>();
-
-    for block in body.basic_blocks_mut() {
-      block.statements.retain(|stmt| {
-        !matches!(
-          stmt.kind,
-          StatementKind::StorageLive(..) | StatementKind::StorageDead(..)
-        )
-      });
-
-      let terminator = block.terminator_mut();
-      terminator.kind = match terminator.kind {
-        TerminatorKind::FalseEdge { real_target, .. } => TerminatorKind::Goto {
-          target: real_target,
-        },
-        TerminatorKind::FalseUnwind { real_target, .. } => TerminatorKind::Goto {
-          target: real_target,
-        },
-        // Ensures that control dependencies can determine the independence of differnet
-        // return paths
-        TerminatorKind::Goto { target } if return_blocks.contains(&target) => {
-          TerminatorKind::Return
-        }
-        _ => continue,
-      }
-    }
-  }
-}
+use crate::{block_timer, cache::Cache};
 
 static SIMPLIFY_MIR: AtomicBool = AtomicBool::new(false);
 
@@ -79,15 +31,11 @@ fn mir_borrowck(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &BorrowCheckResult<'_> {
     tcx.def_path_debug_str(def_id.to_def_id())
   ));
 
-  let mut body_with_facts = rustc_borrowck::consumers::get_body_with_borrowck_facts(
+  let body_with_facts = rustc_borrowck::consumers::get_body_with_borrowck_facts(
     tcx,
     def_id,
     ConsumerOptions::PoloniusInputFacts,
   );
-
-  if SIMPLIFY_MIR.load(Ordering::SeqCst) {
-    SimplifyMir.run_pass(tcx, &mut body_with_facts.body);
-  }
 
   // SAFETY: The reader casts the 'static lifetime to 'tcx before using it.
   let body_with_facts: BodyWithBorrowckFacts<'static> =
